@@ -1,0 +1,7 @@
+NeuralAmpModelerCore/
+NAMLoader.xcodeproj/
+Config/Info.plist
+build/
+Payload/
+*.ipa
+.DS_Store

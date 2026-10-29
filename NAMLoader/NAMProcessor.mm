@@ -4,16 +4,17 @@
 #include <memory>
 #include <mutex>
 #include <cmath>
+#include <cstring>
+#include <stdexcept>
 #include <algorithm>
 #include <filesystem>
 #include <Accelerate/Accelerate.h>
-// Sesuaikan path include dengan versi NeuralAmpModelerCore yang kamu pakai.
+// NeuralAmpModelerCore (dipin ke commit di scripts/fetch_nam_core.sh)
 #include "NAM/dsp.h"
-#if __has_include("NAM/get_dsp.h")
 #include "NAM/get_dsp.h"
-#endif
 
 static const int kRing = 16384; // harus pangkat 2
+static const int kMaxBlock = 4096;
 
 @implementation NAMProcessor {
     std::unique_ptr<nam::DSP> _model;
@@ -31,9 +32,10 @@ static const int kRing = 16384; // harus pangkat 2
     if ((self = [super init])) {
         _ring.assign(kRing, 0); _w = 0; _r = 0; _inPeak = 0; _outPeak = 0;
         _inputGainDb = 0; _masterGainDb = 0; _muted = NO;
-        _sr = 48000; _maxFrames = 512;
-        _in.assign(4096, 0); _out.assign(4096, 0);
-        _irLen = 0; _irEnabled = YES; _work.assign(4096 + 4096, 0); _conv.assign(4096, 0);
+        _sr = 48000; _maxFrames = kMaxBlock;
+        _in.assign(kMaxBlock, 0); _out.assign(kMaxBlock, 0);
+        _irLen = 0; _irEnabled = YES;
+        _work.assign(kMaxBlock * 2, 0); _conv.assign(kMaxBlock, 0);
     }
     return self;
 }
@@ -44,8 +46,11 @@ static const int kRing = 16384; // harus pangkat 2
     try {
         auto m = nam::get_dsp(std::filesystem::path(path.UTF8String));
         if (!m) throw std::runtime_error("Model tidak valid");
-        m->Reset(_sr, _maxFrames);
-        m->prewarm();
+        if (m->NumInputChannels() != 1 || m->NumOutputChannels() != 1)
+            throw std::runtime_error("Hanya model mono (1 input, 1 output) yang didukung");
+        double sr; int mf;
+        { std::lock_guard<std::mutex> g(_modelLock); sr = _sr; mf = _maxFrames; }
+        m->Reset(sr, mf); // Reset sudah termasuk prewarm (di luar thread audio)
         std::lock_guard<std::mutex> g(_modelLock);
         _model = std::move(m);
         return YES;
@@ -53,11 +58,15 @@ static const int kRing = 16384; // harus pangkat 2
         if (error) *error = [NSError errorWithDomain:@"NAMLoader" code:1
             userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithUTF8String:e.what()]}];
         return NO;
+    } catch (...) {
+        if (error) *error = [NSError errorWithDomain:@"NAMLoader" code:2
+            userInfo:@{NSLocalizedDescriptionKey: @"Kesalahan tidak dikenal saat memuat model"}];
+        return NO;
     }
 }
 
 - (void)setImpulse:(const float *)ir length:(int)n {
-    n = std::min(n, 4096); // ~85 ms @48k; cukup untuk cabinet
+    n = std::min(n, kMaxBlock); // ~85 ms @48k; cukup untuk cabinet
     if (n <= 0) { [self clearImpulse]; return; }
     std::vector<float> rev(n);
     float e = 0;
@@ -65,9 +74,10 @@ static const int kRing = 16384; // harus pangkat 2
     float g = e > 1e-12f ? 1.f / sqrtf(e) : 1.f; // normalisasi energi
     for (int i = 0; i < n; i++) rev[n - 1 - i] = ir[i] * g;
     std::lock_guard<std::mutex> lk(_modelLock);
-    _irRev = std::move(rev); _irLen = n;
+    _irRev = std::move(rev);
     _hist.assign(n - 1, 0);
-    _work.assign(n - 1 + 4096, 0);
+    _work.assign(n - 1 + kMaxBlock, 0);
+    _irLen = n;
 }
 
 - (void)clearImpulse {
@@ -79,7 +89,7 @@ static const int kRing = 16384; // harus pangkat 2
 
 - (void)prepareWithSampleRate:(double)sr maxFrames:(int)n {
     std::lock_guard<std::mutex> g(_modelLock);
-    _sr = sr; _maxFrames = std::min(n, 4096);
+    _sr = sr; _maxFrames = std::min(n, kMaxBlock);
     if (_model) _model->Reset(sr, _maxFrames);
 }
 
@@ -95,7 +105,7 @@ static const int kRing = 16384; // harus pangkat 2
 }
 
 - (void)renderOutput:(float *)out frames:(int)n {
-    n = std::min(n, 4096);
+    n = std::min(n, kMaxBlock);
     uint32_t r = _r.load(std::memory_order_relaxed);
     uint32_t w = _w.load(std::memory_order_acquire);
     uint32_t avail = w - r;
@@ -107,13 +117,18 @@ static const int kRing = 16384; // harus pangkat 2
 
     bool ok = false;
     if (_modelLock.try_lock()) {
-        if (_model) { _model->process(_in.data(), _out.data(), n); ok = true; }
+        if (_model) {
+            NAM_SAMPLE *inCh[1]  = { _in.data() };
+            NAM_SAMPLE *outCh[1] = { _out.data() };
+            _model->process(inCh, outCh, n);
+            ok = true;
+        }
         if (ok && _irEnabled && _irLen > 0) {
             int h = _irLen - 1;
             for (int i = 0; i < n; i++) _work[h + i] = (float)_out[i];
-            memcpy(_work.data(), _hist.data(), h * sizeof(float));
+            if (h > 0) memcpy(_work.data(), _hist.data(), h * sizeof(float));
             vDSP_conv(_work.data(), 1, _irRev.data(), 1, _conv.data(), 1, n, _irLen);
-            memcpy(_hist.data(), _work.data() + n, h * sizeof(float));
+            if (h > 0) memcpy(_hist.data(), _work.data() + n, h * sizeof(float));
             for (int i = 0; i < n; i++) _out[i] = _conv[i];
         }
         _modelLock.unlock();

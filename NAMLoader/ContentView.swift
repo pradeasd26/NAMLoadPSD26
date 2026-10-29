@@ -14,7 +14,7 @@ struct ContentView: View {
                         Button { audio.togglePower() } label: {
                             Image(systemName: "power")
                                 .font(.title.bold())
-                                .foregroundStyle(audio.isRunning ? .green : .gray)
+                                .foregroundStyle(audio.isRunning ? Color.green : Color.gray)
                                 .frame(width: 56, height: 56)
                                 .background(.quaternary, in: Circle())
                         }
@@ -89,11 +89,17 @@ struct ContentView: View {
             GeometryReader { g in
                 ZStack(alignment: .leading) {
                     Capsule().fill(.quaternary)
-                    Capsule().fill(v > 0.95 ? .red : v > 0.75 ? .yellow : .green)
+                    Capsule().fill(meterColor(v))
                         .frame(width: g.size.width * CGFloat(v))
                 }
             }.frame(height: 10)
         }
+    }
+
+    func meterColor(_ v: Float) -> Color {
+        if v > 0.95 { return Color.red }
+        if v > 0.75 { return Color.yellow }
+        return Color.green
     }
 
     func slider(_ t: String, _ v: Binding<Float>, _ r: ClosedRange<Float>, _ u: String) -> some View {

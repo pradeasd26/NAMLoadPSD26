@@ -20,6 +20,8 @@ final class AudioManager: ObservableObject {
     private let engine = AVAudioEngine()
     private let proc = NAMProcessor()
     private var timer: Timer?
+    private var sinkNode: AVAudioSinkNode?
+    private var sourceNode: AVAudioSourceNode?
 
     init() {
         FileStore.prepare()
@@ -51,41 +53,66 @@ final class AudioManager: ObservableObject {
             try s.setActive(true)
 
             let sr = s.sampleRate
-            proc.prepare(withSampleRate: sr, maxFrames: 512)
+            proc.prepare(withSampleRate: sr, maxFrames: 4096)
 
-            engine.stop(); engine.reset()
+            engine.stop()
+            if let n = sinkNode { engine.detach(n); sinkNode = nil }
+            if let n = sourceNode { engine.detach(n); sourceNode = nil }
+            engine.reset()
+
             let inFmt = engine.inputNode.outputFormat(forBus: 0)
-            let proc = self.proc
-
-            let sink = AVAudioSinkNode { _, frames, abl in
-                let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
-                if let p = list[0].mData?.assumingMemoryBound(to: Float.self) {
-                    proc.pushInput(p, frames: Int32(frames))
-                }
-                return noErr
+            guard inFmt.sampleRate > 0, inFmt.channelCount > 0 else {
+                message = "Input audio tidak tersedia. Periksa izin mikrofon atau sambungan interface."
+                return
             }
             let outFmt = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2)!
-            let source = AVAudioSourceNode(format: outFmt) { _, _, frames, abl in
-                let list = UnsafeMutableAudioBufferListPointer(abl)
-                guard let l = list[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
-                proc.renderOutput(l, frames: Int32(frames))
-                if list.count > 1, let r = list[1].mData {
-                    memcpy(r, l, Int(frames) * MemoryLayout<Float>.size)
-                }
-                return noErr
-            }
+
+            let sink = Self.makeSink(proc)
+            let source = Self.makeSource(proc, format: outFmt)
             engine.attach(sink); engine.attach(source)
             engine.connect(engine.inputNode, to: sink, format: inFmt)
             engine.connect(source, to: engine.mainMixerNode, format: outFmt)
+            sinkNode = sink; sourceNode = source
             try engine.start()
 
             isRunning = true; message = nil
             updateGuard()
-            timer = Timer.scheduledTimer(withTimeInterval: 1/30, repeats: true) { [weak self] _ in
+            timer?.invalidate()
+            timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.pollMeters() }
             }
         } catch {
             message = "Audio tidak bisa dimulai. Aplikasi lain mungkin memakai interface — coba lagi."
+        }
+    }
+
+    // Node dibuat di luar isolasi @MainActor supaya blok render (thread audio) tidak
+    // mewarisi isolasi main actor.
+    nonisolated private static func makeSink(_ p: NAMProcessor) -> AVAudioSinkNode {
+        AVAudioSinkNode { _, frames, abl in
+            let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
+            if let ptr = list[0].mData?.assumingMemoryBound(to: Float.self) {
+                p.pushInput(ptr, frames: Int32(frames))
+            }
+            return noErr
+        }
+    }
+
+    nonisolated private static func makeSource(_ p: NAMProcessor, format: AVAudioFormat) -> AVAudioSourceNode {
+        AVAudioSourceNode(format: format) { _, _, frames, abl in
+            let list = UnsafeMutableAudioBufferListPointer(abl)
+            guard let l = list[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+            let total = Int(frames)
+            var done = 0
+            while done < total {          // proses per blok maks 4096 frame
+                let c = min(4096, total - done)
+                p.renderOutput(l + done, frames: Int32(c))
+                done += c
+            }
+            if list.count > 1, let r = list[1].mData {
+                memcpy(r, l, total * MemoryLayout<Float>.size)
+            }
+            return noErr
         }
     }
 

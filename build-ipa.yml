@@ -1,0 +1,57 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build NAMLoader.ipa (tanpa tanda tangan)
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unduh NeuralAmpModelerCore
+        run: bash scripts/fetch_nam_core.sh
+
+      - name: Pasang XcodeGen dan buat proyek
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build (Release, iphoneos)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project NAMLoader.xcodeproj \
+            -scheme NAMLoader \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet \
+            build
+
+      - name: Buat IPA
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
+          test -n "$APP" || { echo "NAMLoader.app tidak ditemukan"; exit 1; }
+          rm -rf Payload NAMLoader.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry NAMLoader.ipa Payload
+          ls -lh NAMLoader.ipa
+
+      - name: Unggah artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAMLoader.ipa
+          path: NAMLoader.ipa
+          if-no-files-found: error
