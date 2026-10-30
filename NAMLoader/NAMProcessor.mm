@@ -1,4 +1,5 @@
-#import "NAMProcessor.h"
+// PENTING: header NAM Core harus di-include SEBELUM Foundation/NAMProcessor.h,
+// karena enum nam::Supported memakai nama YES/NO yang bentrok dengan macro Objective-C.
 #include <atomic>
 #include <vector>
 #include <memory>
@@ -8,10 +9,11 @@
 #include <stdexcept>
 #include <algorithm>
 #include <filesystem>
-#include <Accelerate/Accelerate.h>
-// NeuralAmpModelerCore (dipin ke commit di scripts/fetch_nam_core.sh)
 #include "NAM/dsp.h"
 #include "NAM/get_dsp.h"
+
+#import "NAMProcessor.h"
+#include <Accelerate/Accelerate.h>
 
 static const int kRing = 16384; // harus pangkat 2
 static const int kMaxBlock = 4096;
