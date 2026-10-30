@@ -24,7 +24,8 @@ jobs:
 
       - name: Unduh NeuralAmpModelerCore
         run: bash scripts/fetch_nam_core.sh
-
+      - name: Buat ikon aplikasi
+        run: python3 scripts/make_icon.py
       - name: Pasang XcodeGen dan buat proyek
         run: |
           brew install xcodegen
