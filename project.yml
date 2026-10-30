@@ -1,6 +1,6 @@
 name: NAMLoader
 options:
- xcodeVersion: "15.0"
+  xcodeVersion: "15.0"
   bundleIdPrefix: com.pradea26
   deploymentTarget:
     iOS: "17.0"
