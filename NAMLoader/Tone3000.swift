@@ -4,6 +4,14 @@ import Foundation
 import Security
 import SwiftUI
 
+// MARK: - Konfigurasi
+
+enum Tone3000Config {
+    /// Isi dengan Client ID publik milikmu ("t3k_pub_...") agar pengguna tidak perlu mengetik apa pun.
+    /// Kunci "publishable" ini aman ditanam di aplikasi (bukan kunci rahasia t3k_cs_).
+    static let embeddedClientID = ""
+}
+
 // MARK: - Jenis unduhan
 
 enum DownloadKind {
@@ -229,15 +237,25 @@ final class Tone3000Client: ObservableObject {
 @MainActor
 struct DownloadSheet: View {
     let kind: DownloadKind
-    @EnvironmentObject var audio: AudioManager
+    let autoStart: Bool
+    let onPicked: (URL) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.webAuthenticationSession) private var webAuth
     @StateObject private var api = Tone3000Client()
-    @AppStorage("t3k_client_id") private var clientID = ""
+    @AppStorage("t3k_client_id") private var storedClientID = ""
     @State private var urlText = ""
 
+    init(kind: DownloadKind, autoStart: Bool = false, onPicked: @escaping (URL) -> Void) {
+        self.kind = kind
+        self.autoStart = autoStart
+        self.onPicked = onPicked
+    }
+
     private var accent: Color { kind == .amp ? Theme.amber : Theme.orange }
-    private var noClient: Bool { clientID.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var embedded: String { Tone3000Config.embeddedClientID.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var clientID: String {
+        embedded.isEmpty ? storedClientID.trimmingCharacters(in: .whitespacesAndNewlines) : embedded
+    }
 
     var body: some View {
         NavigationStack {
@@ -246,8 +264,8 @@ struct DownloadSheet: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         tonePanel
+                        if embedded.isEmpty { setupPanel }
                         urlPanel
-                        notePanel
                     }
                     .padding(16)
                 }
@@ -261,26 +279,31 @@ struct DownloadSheet: View {
             }
         }
         .preferredColorScheme(.dark)
+        .task {
+            if autoStart && !clientID.isEmpty { await runBrowse() }
+        }
+    }
+
+    private func runBrowse() async {
+        await api.browse(kind: kind, clientID: clientID, session: webAuth)
+        if api.models.count == 1, let m = api.models.first {
+            let dest = await api.download(m, kind: kind)
+            finish(dest)
+        }
     }
 
     private var tonePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             Caption(text: "TONE3000")
-            Text("Cari tone di katalog TONE3000, pilih satu, lalu file langsung diunduh ke iPhone.")
+            Text("Pilih tone di katalog TONE3000. Setelah dipilih, file diunduh otomatis dan langsung dipasang ke slot.")
                 .font(.footnote).foregroundStyle(Theme.text)
-            TextField("Client ID (t3k_pub_…)", text: $clientID)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.25)))
-                .foregroundStyle(Theme.text)
             Button {
-                Task { await api.browse(kind: kind, clientID: clientID, session: webAuth) }
+                Task { await runBrowse() }
             } label: {
-                Label("Cari di TONE3000", systemImage: "magnifyingglass")
+                Label("Buka katalog TONE3000", systemImage: "magnifyingglass")
             }
             .buttonStyle(PillButton(color: accent, filled: true))
-            .disabled(api.busy || noClient)
+            .disabled(api.busy || clientID.isEmpty)
             if api.busy { ProgressView().tint(accent) }
             if !api.status.isEmpty {
                 Text(api.status).font(.footnote).foregroundStyle(Theme.dim)
@@ -303,8 +326,29 @@ struct DownloadSheet: View {
                 .buttonStyle(.plain)
                 .disabled(api.busy)
             }
+            Text("Atribusi: katalog dan tone oleh TONE3000 dan para pembuatnya.")
+                .font(.system(size: 11)).foregroundStyle(Theme.dim)
         }
         .glassCard(accent)
+    }
+
+    private var setupPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Caption(text: "Hubungkan akun TONE3000 (sekali saja)")
+            TextField("Client ID (t3k_pub_…)", text: $storedClientID)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.25)))
+                .foregroundStyle(Theme.text)
+            Text("1. Buat akun gratis di tone3000.com.\n2. Settings → API Keys → buat key baru.\n3. Salin kunci berawalan t3k_pub_ dan tempel di atas.\n4. Bila diminta Redirect URI, isi: namloader://callback")
+                .font(.footnote).foregroundStyle(Theme.text)
+            if let u = URL(string: "https://www.tone3000.com/api") {
+                Link("Buka tone3000.com/api", destination: u)
+                    .font(.footnote.weight(.semibold))
+            }
+        }
+        .glassCard(Theme.dim)
     }
 
     private var urlPanel: some View {
@@ -327,25 +371,15 @@ struct DownloadSheet: View {
             }
             .buttonStyle(PillButton(color: accent))
             .disabled(api.busy || urlText.isEmpty)
+            Text("Neural DSP tidak menyediakan API atau unduhan file .nam publik, jadi tidak bisa disambungkan. Untuk sumber lain, tempel link langsung ke file .nam atau .wav.")
+                .font(.system(size: 11)).foregroundStyle(Theme.dim)
         }
         .glassCard(Theme.cyan)
     }
 
-    private var notePanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Caption(text: "Cara mendapatkan Client ID")
-            Text("1. Buat akun gratis di tone3000.com.\n2. Buka Settings → API Keys, buat key baru.\n3. Salin kunci yang berawalan t3k_pub_ dan tempel di atas.\n4. Bila diminta mendaftarkan Redirect URI, isi: namloader://callback")
-                .font(.footnote).foregroundStyle(Theme.text)
-            Text("Neural DSP tidak menyediakan API atau unduhan file .nam publik yang bisa dipakai aplikasi ini. Jika kamu punya link langsung ke file .nam atau .wav dari sumber lain, tempel di kolom link langsung.")
-                .font(.footnote).foregroundStyle(Theme.dim)
-        }
-        .glassCard(Theme.dim)
-    }
-
     private func finish(_ dest: URL?) {
         guard let dest = dest else { return }
-        audio.refreshModels()
-        if kind == .amp { audio.loadModel(dest) } else { audio.loadIR(dest) }
+        onPicked(dest)
         dismiss()
     }
 }
