@@ -1,497 +1,295 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
-private enum ActiveSheet: Identifiable {
-    case picker(Int)
-    case download(Int, Bool)   // nomor slot, mulai otomatis
+// MARK: - Knob putar (geser vertikal, ketuk dua kali = reset)
 
-    var id: String {
-        switch self {
-        case .picker(let i): return "picker-\(i)"
-        case .download(let i, _): return "download-\(i)"
+struct KnobView: View {
+    let spec: ParamSpec
+    let color: Color
+    @Binding var value: Float
+    @State private var dragStart: Float?
+
+    private var norm: Double {
+        let r = spec.max - spec.min
+        return r > 0 ? Double((value - spec.min) / r) : 0
+    }
+
+    var body: some View {
+        VStack(spacing: 5) {
+            ZStack {
+                Circle().fill(Color.black.opacity(0.38))
+                Circle().trim(from: 0, to: 0.75).rotation(.degrees(135))
+                    .stroke(Theme.dim.opacity(0.25), style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .padding(5)
+                Circle().trim(from: 0, to: 0.75 * CGFloat(norm)).rotation(.degrees(135))
+                    .stroke(color, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .padding(5)
+                Capsule().fill(Theme.text)
+                    .frame(width: 3, height: 11)
+                    .offset(y: -14)
+                    .rotationEffect(.degrees(-135 + 270 * norm))
+            }
+            .frame(width: 58, height: 58)
+            .contentShape(Circle())
+            .gesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { g in
+                        if dragStart == nil { dragStart = value }
+                        let range = spec.max - spec.min
+                        var v = (dragStart ?? value) + Float(-g.translation.height / 160) * range
+                        v = min(max(v, spec.min), spec.max)
+                        if spec.step > 0 { v = spec.min + ((v - spec.min) / spec.step).rounded() * spec.step }
+                        v = min(max(v, spec.min), spec.max)
+                        if v != value { value = v }
+                    }
+                    .onEnded { _ in dragStart = nil }
+            )
+            .onTapGesture(count: 2) { value = spec.def }
+            .onTapGesture {
+                if let c = spec.choices { value = Float((Int(value.rounded()) + 1) % c.count) }
+            }
+            Text(spec.name)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.dim)
+                .lineLimit(1)
+            Text(spec.text(value))
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spec.name)
+        .accessibilityValue(spec.text(value))
+        .accessibilityAdjustableAction { dir in
+            let step = max(spec.step, (spec.max - spec.min) / 100)
+            switch dir {
+            case .increment: value = min(value + step, spec.max)
+            case .decrement: value = max(value - step, spec.min)
+            @unknown default: break
+            }
         }
     }
 }
 
-struct ContentView: View {
-    @EnvironmentObject var audio: AudioManager
-    @State private var selected = 1
-    @State private var sheet: ActiveSheet?
-    @State private var showImporter = false
-    @State private var importSlot = 0
+// MARK: - Meter horizontal
 
-    private var importTypes: [UTType] {
-        if audio.slots[importSlot].type == .neural { return [UTType(filenameExtension: "nam") ?? UTType.data] }
-        return [UTType.wav, UTType.audio]
-    }
+struct LevelBar: View {
+    let value: Float
+    let base: Color
+    var clip = false
 
     var body: some View {
-        ZStack {
-            AppBackground()
-            ScrollView {
-                VStack(spacing: 16) {
-                    header
-                    if audio.feedbackMuted {
-                        notice("Output dimute agar tidak feedback (mik → speaker). Sambungkan interface atau headphone.",
-                               color: Theme.amber,
-                               action: ("Nyalakan suara", audio.unmuteOnce))
-                    }
-                    if let m = audio.message { notice(m, color: Theme.red) }
-                    modeBar
-                    chainCard
-                    metersCard
-                    editor
-                    mixerCard
-                    settingsCard
-                    footer
-                }
-                .padding(16)
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.black.opacity(0.35))
+                Capsule().fill(color)
+                    .frame(width: max(0, g.size.width * CGFloat(value)))
             }
         }
-        .preferredColorScheme(.dark)
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: importTypes) { r in
-            guard case .success(let u) = r else { return }
-            audio.importFile(u, into: importSlot)
-        }
-        .sheet(item: $sheet) { s in
-            switch s {
-            case .picker(let i):
-                BlockPickerSheet(slot: i) { t in
-                    audio.setType(i, t)
-                    selected = i
-                    if t.needsFile { sheet = .download(i, true) } else { sheet = nil }
-                }
-            case .download(let i, let auto):
-                DownloadSheet(kind: audio.slots[i].type == .cab ? .ir : .amp, autoStart: auto) { url in
-                    audio.assignFile(i, url)
-                }
-            }
-        }
+        .frame(height: 8)
     }
 
-    // MARK: Header
-    private var header: some View {
-        HStack(spacing: 16) {
-            Button { audio.togglePower() } label: {
-                ZStack {
-                    Circle().fill(Color.black.opacity(0.35))
-                    Circle().stroke(audio.isRunning ? Theme.green : Theme.dim.opacity(0.5), lineWidth: 3)
-                    Image(systemName: "power")
-                        .font(.system(size: 26, weight: .bold))
-                        .foregroundStyle(audio.isRunning ? Theme.green : Theme.dim)
-                }
-                .frame(width: 64, height: 64)
-                .shadow(color: audio.isRunning ? Theme.green.opacity(0.6) : Color.clear, radius: 12)
-            }
-            .buttonStyle(.plain)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("NAMLoader")
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
-                    .foregroundStyle(Theme.text)
-                Caption(text: audio.isRunning ? "Audio menyala" : "Audio mati")
-            }
-            Spacer()
-        }
-    }
-
-    // MARK: Mode 1 / 2 jalur
-    private var modeBar: some View {
-        HStack(spacing: 0) {
-            modeButton("1 JALUR", "arrow.right", !audio.dual) { audio.dual = false }
-            modeButton("2 JALUR", "arrow.triangle.branch", audio.dual) { audio.dual = true }
-        }
-        .padding(4)
-        .background(Capsule().fill(Color.black.opacity(0.30)))
-    }
-
-    private func modeButton(_ title: String, _ icon: String, _ on: Bool, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                Text(title)
-            }
-            .font(.system(size: 12, weight: .bold))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .foregroundStyle(on ? Color.black.opacity(0.85) : Theme.dim)
-            .background(Capsule().fill(on ? Theme.cyan : Color.clear))
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: Signal chain
-    private var chainCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Caption(text: audio.dual ? "Signal chain · 2 jalur paralel" : "Signal chain · 1 jalur serial")
-                Spacer()
-                Text("12 slot").font(.system(size: 11)).foregroundStyle(Theme.dim)
-            }
-            if audio.dual {
-                lane("A", 0..<6, Theme.cyan)
-                lane("B", 6..<12, Theme.orange)
-                Text("Sinyal gitar dibagi ke jalur A dan B, lalu digabung di Mixer.")
-                    .font(.system(size: 11)).foregroundStyle(Theme.dim)
-            } else {
-                lane(nil, 0..<12, Theme.cyan)
-                Text("Geser ke kanan untuk slot berikutnya. Ketuk slot kosong untuk menambah blok.")
-                    .font(.system(size: 11)).foregroundStyle(Theme.dim)
-            }
-        }
-        .glassCard(Theme.cyan)
-    }
-
-    private func lane(_ label: String?, _ range: Range<Int>, _ color: Color) -> some View {
-        HStack(spacing: 8) {
-            if let l = label {
-                Text(l)
-                    .font(.system(size: 13, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Color.black.opacity(0.8))
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(color))
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(Array(range), id: \.self) { i in
-                        tile(i)
-                        if i != range.upperBound - 1 { connector }
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-        }
-    }
-
-    private var connector: some View {
-        Rectangle().fill(Theme.dim.opacity(0.4)).frame(width: 8, height: 2)
-    }
-
-    private func tile(_ i: Int) -> some View {
-        let s = audio.slots[i]
-        let color = s.type.color
-        let sel = selected == i
-        let empty = s.type == .empty
-        let active = !empty && s.on && (!s.type.needsFile || s.file != nil)
-        return Button {
-            selected = i
-            if empty { sheet = .picker(i) }
-        } label: {
-            VStack(spacing: 0) {
-                VStack(spacing: 7) {
-                    Image(systemName: s.type.icon)
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(color.opacity(empty ? 0.6 : 1))
-                    Text(s.type.short)
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Theme.text.opacity(empty ? 0.5 : 1))
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                Rectangle()
-                    .fill(color.opacity(empty ? 0.05 : 0.18))
-                    .frame(height: 24)
-                    .overlay(Circle().fill(active ? color : Theme.dim.opacity(0.5)).frame(width: 8, height: 8))
-            }
-            .frame(width: 70)
-            .background(color.opacity(sel ? 0.22 : (empty ? 0.04 : 0.10)))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(color.opacity(sel ? 0.95 : 0.35),
-                                  style: StrokeStyle(lineWidth: sel ? 2 : 1, dash: empty ? [4, 3] : []))
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: Meter
-    private var metersCard: some View {
-        VStack(spacing: 12) {
-            meterRow("IN", audio.inLevel, Theme.cyan)
-            meterRow("OUT", audio.outLevel, Theme.green)
-        }
-        .glassCard(Theme.cyan)
-    }
-
-    private func meterRow(_ t: String, _ v: Float, _ base: Color) -> some View {
-        HStack(spacing: 10) {
-            Text(t)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(Theme.dim)
-                .frame(width: 34, alignment: .leading)
-            GeometryReader { g in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.black.opacity(0.35))
-                    Capsule().fill(meterColor(v, base))
-                        .frame(width: g.size.width * CGFloat(v))
-                }
-            }
-            .frame(height: 10)
-        }
-    }
-
-    private func meterColor(_ v: Float, _ base: Color) -> Color {
-        if v > 0.95 { return Theme.red }
-        if v > 0.75 { return Theme.amber }
+    private var color: Color {
+        if clip || value > 0.95 { return Theme.red }
+        if value > 0.78 { return Theme.amber }
         return base
     }
+}
 
-    // MARK: Editor slot terpilih
-    private func slotName(_ i: Int) -> String {
-        if audio.dual { return i < 6 ? "Jalur A · slot \(i + 1)" : "Jalur B · slot \(i - 5)" }
-        return "Slot \(i + 1) dari 12"
-    }
+struct MeterRow: View {
+    let title: String
+    let value: Float
+    let color: Color
+    var clip = false
 
-    private var editor: some View {
-        let s = audio.slots[selected]
-        let color = s.type.color
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Image(systemName: s.type.icon)
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(color)
-                VStack(alignment: .leading, spacing: 2) {
-                    Caption(text: slotName(selected))
-                    Text(s.type == .empty ? "Slot kosong" : s.type.title)
-                        .font(.system(size: 19, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Theme.text)
-                }
-                Spacer()
-                if s.type != .empty {
-                    Toggle("", isOn: Binding(get: { audio.slots[selected].on },
-                                             set: { audio.setOn(selected, $0) }))
-                        .labelsHidden()
-                        .tint(color)
-                }
-            }
-            if s.type == .empty {
-                Button { sheet = .picker(selected) } label: {
-                    Label("Pilih blok", systemImage: "plus.circle.fill")
-                }
-                .buttonStyle(PillButton(color: Theme.cyan, filled: true))
-            } else {
-                ForEach(Array(s.type.params.enumerated()), id: \.offset) { k, spec in
-                    paramRow(k, spec, color)
-                }
-                if s.type.needsFile { fileSection(s, color) }
-                HStack(spacing: 10) {
-                    Button("Ganti blok") { sheet = .picker(selected) }
-                        .buttonStyle(PillButton(color: color))
-                    Button("Kosongkan") { audio.clearSlot(selected) }
-                        .buttonStyle(PillButton(color: Theme.red))
-                }
-            }
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Theme.dim)
+                .frame(width: 34, alignment: .leading)
+            LevelBar(value: value, base: color, clip: clip)
         }
-        .glassCard(color)
-    }
-
-    private func paramRow(_ k: Int, _ spec: ParamSpec, _ color: Color) -> some View {
-        let binding = Binding<Float>(get: { audio.slots[selected].values[k] },
-                                     set: { audio.setParam(selected, k, $0) })
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Caption(text: spec.name)
-                Spacer()
-                Text(valueText(binding.wrappedValue, spec))
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(color)
-            }
-            Slider(value: binding, in: spec.min...spec.max, step: spec.step).tint(color)
-        }
-    }
-
-    private func valueText(_ v: Float, _ spec: ParamSpec) -> String {
-        String(format: "%.\(spec.decimals)f", v) + " " + spec.unit
-    }
-
-    private func fileSection(_ s: Slot, _ color: Color) -> some View {
-        let isAmp = s.type == .neural
-        let files = isAmp ? audio.models : audio.irs
-        return VStack(alignment: .leading, spacing: 10) {
-            Caption(text: isAmp ? "Model (.nam)" : "Impulse response (.wav)")
-            Text(s.fileLabel ?? "Belum ada file")
-                .font(.system(size: 17, weight: .semibold, design: .rounded))
-                .foregroundStyle(s.file == nil ? Theme.dim : color)
-            ForEach(files, id: \.self) { u in
-                itemRow(u.deletingPathExtension().lastPathComponent,
-                        audio.isSelected(selected, file: u), color) {
-                    audio.assignFile(selected, u)
-                }
-            }
-            HStack(spacing: 10) {
-                Button { sheet = .download(selected, true) } label: {
-                    Label("Unduh TONE3000", systemImage: "icloud.and.arrow.down")
-                }
-                .buttonStyle(PillButton(color: color, filled: true))
-                Button("Impor…") { importSlot = selected; showImporter = true }
-                    .buttonStyle(PillButton(color: color))
-            }
-        }
-    }
-
-    // MARK: Mixer
-    private var mixerCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Caption(text: "Mixer")
-            dbRow("Trim input", $audio.inputGainDb, -12...24, Theme.cyan)
-            dbRow("Master", $audio.masterDb, -60...12, Theme.green)
-            if audio.dual {
-                Divider().overlay(Theme.dim.opacity(0.3))
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Caption(text: "Balance A ↔ B")
-                        Spacer()
-                        Text("A \(Int((1 - audio.balance) * 100))% · B \(Int(audio.balance * 100))%")
-                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Theme.orange)
-                    }
-                    Slider(value: $audio.balance, in: 0...1).tint(Theme.orange)
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Caption(text: "Stereo spread")
-                        Spacer()
-                        Text("\(Int(audio.spread * 100))%")
-                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Theme.orange)
-                    }
-                    Slider(value: $audio.spread, in: 0...1).tint(Theme.orange)
-                    Text("0% = mono. 100% = jalur A di kiri, jalur B di kanan.")
-                        .font(.system(size: 11)).foregroundStyle(Theme.dim)
-                }
-            }
-        }
-        .glassCard(Theme.green)
-    }
-
-    private func dbRow(_ title: String, _ value: Binding<Float>, _ range: ClosedRange<Float>, _ color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Caption(text: title)
-                Spacer()
-                Text("\(Int(value.wrappedValue)) dB")
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(color)
-            }
-            Slider(value: value, in: range, step: 1).tint(color)
-        }
-    }
-
-    private var settingsCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Caption(text: "Pengaturan")
-            Toggle(isOn: $audio.feedbackGuard) {
-                Text("Pelindung feedback").foregroundStyle(Theme.text)
-            }
-            .tint(Theme.cyan)
-        }
-        .glassCard(Theme.dim)
-    }
-
-    private var footer: some View {
-        Text("Katalog tone online oleh TONE3000 · tone3000.com")
-            .font(.system(size: 11))
-            .foregroundStyle(Theme.dim)
-            .padding(.top, 4)
-    }
-
-    // MARK: Komponen kecil
-    private func itemRow(_ name: String, _ selected: Bool, _ color: Color, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? color : Theme.dim)
-                Text(name).lineLimit(1).foregroundStyle(Theme.text)
-                Spacer()
-            }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(color.opacity(selected ? 0.18 : 0.06)))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func notice(_ text: String, color: Color, action: (String, () -> Void)? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(text).font(.footnote).foregroundStyle(Theme.text)
-            if let a = action {
-                Button(a.0, action: a.1).buttonStyle(PillButton(color: color))
-            }
-        }
-        .glassCard(color)
     }
 }
 
-// MARK: - Pemilih blok
+/// Meter IN/OUT. Mengamati MeterModel langsung, sehingga hanya view ini yang digambar ulang ~20x/detik.
+struct MetersStrip: View {
+    @ObservedObject var meters: MeterModel
+    var body: some View {
+        VStack(spacing: 8) {
+            MeterRow(title: "IN", value: meters.inLevel, color: Theme.cyan)
+            MeterRow(title: "OUT", value: meters.outLevel, color: Theme.green, clip: meters.outClip)
+        }
+        .glassCard(Theme.cyan)
+    }
+}
 
-struct BlockPickerSheet: View {
-    let slot: Int
-    let onPick: (BlockType) -> Void
-    @Environment(\.dismiss) private var dismiss
-    private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+/// Indikator beban DSP (waktu render dibanding durasi buffer).
+struct DSPChip: View {
+    @ObservedObject var meters: MeterModel
+    var body: some View {
+        let pct = Int((meters.dsp * 100).rounded())
+        let c: Color = pct < 50 ? Theme.green : (pct < 80 ? Theme.amber : Theme.red)
+        HStack(spacing: 5) {
+            Circle().fill(c).frame(width: 7, height: 7)
+            Text("DSP \(pct)%")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(Theme.text)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(Capsule().fill(Color.black.opacity(0.35)))
+        .overlay(Capsule().stroke(c.opacity(0.5), lineWidth: 1))
+        .accessibilityLabel("Beban DSP \(pct) persen")
+    }
+}
+
+// MARK: - Matematika respons frekuensi (cermin dari rumus biquad di Chain.hpp)
+
+enum EQMath {
+    struct Coef { var b0, b1, b2, a1, a2: Double }
+
+    static func norm(_ b0: Double, _ b1: Double, _ b2: Double, _ a0: Double, _ a1: Double, _ a2: Double) -> Coef {
+        Coef(b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0)
+    }
+
+    static func lowShelf(_ f0: Double, _ dB: Double, _ sr: Double) -> Coef {
+        let A = pow(10, dB / 40), w = 2 * Double.pi * f0 / sr
+        let cs = cos(w), sn = sin(w), al = sn * 0.70710678, sA = 2 * sqrt(A) * al
+        return norm(A * ((A + 1) - (A - 1) * cs + sA), 2 * A * ((A - 1) - (A + 1) * cs), A * ((A + 1) - (A - 1) * cs - sA),
+                    (A + 1) + (A - 1) * cs + sA, -2 * ((A - 1) + (A + 1) * cs), (A + 1) + (A - 1) * cs - sA)
+    }
+
+    static func highShelf(_ f0: Double, _ dB: Double, _ sr: Double) -> Coef {
+        let A = pow(10, dB / 40), w = 2 * Double.pi * f0 / sr
+        let cs = cos(w), sn = sin(w), al = sn * 0.70710678, sA = 2 * sqrt(A) * al
+        return norm(A * ((A + 1) + (A - 1) * cs + sA), -2 * A * ((A - 1) + (A + 1) * cs), A * ((A + 1) + (A - 1) * cs - sA),
+                    (A + 1) - (A - 1) * cs + sA, 2 * ((A - 1) - (A + 1) * cs), (A + 1) - (A - 1) * cs - sA)
+    }
+
+    static func peaking(_ f0: Double, _ dB: Double, _ q: Double, _ sr: Double) -> Coef {
+        let A = pow(10, dB / 40), w = 2 * Double.pi * f0 / sr
+        let cs = cos(w), al = sin(w) / (2 * q)
+        return norm(1 + al * A, -2 * cs, 1 - al * A, 1 + al / A, -2 * cs, 1 - al / A)
+    }
+
+    static func lowpass(_ f0: Double, _ q: Double, _ sr: Double) -> Coef {
+        let w = 2 * Double.pi * f0 / sr, cs = cos(w), al = sin(w) / (2 * q)
+        return norm((1 - cs) / 2, 1 - cs, (1 - cs) / 2, 1 + al, -2 * cs, 1 - al)
+    }
+
+    static func highpass(_ f0: Double, _ q: Double, _ sr: Double) -> Coef {
+        let w = 2 * Double.pi * f0 / sr, cs = cos(w), al = sin(w) / (2 * q)
+        return norm((1 + cs) / 2, -(1 + cs), (1 + cs) / 2, 1 + al, -2 * cs, 1 - al)
+    }
+
+    static func magnitudeDB(_ c: Coef, _ f: Double, _ sr: Double) -> Double {
+        let w = 2 * Double.pi * f / sr
+        let c1 = cos(w), s1 = sin(w), c2 = cos(2 * w), s2 = sin(2 * w)
+        let nr = c.b0 + c.b1 * c1 + c.b2 * c2, ni = -(c.b1 * s1 + c.b2 * s2)
+        let dr = 1 + c.a1 * c1 + c.a2 * c2, di = -(c.a1 * s1 + c.a2 * s2)
+        let m = sqrt((nr * nr + ni * ni) / max(dr * dr + di * di, 1e-30))
+        return 20 * log10(max(m, 1e-9))
+    }
+
+    static func bands(_ type: BlockType, _ v: [Float], sr: Double) -> [Coef] {
+        func d(_ i: Int) -> Double { Double(v[i]) }
+        switch type {
+        case .eq:
+            return [lowShelf(120, d(0), sr), peaking(d(3), d(1), 0.8, sr), highShelf(4000, d(2), sr)]
+        case .paraEQ:
+            return [lowShelf(d(0), d(1), sr), peaking(d(2), d(3), 1, sr), peaking(d(4), d(5), 1, sr), highShelf(d(6), d(7), sr)]
+        case .graphicEQ:
+            return [lowShelf(100, d(0), sr), peaking(300, d(1), 1.2, sr), peaking(800, d(2), 1.2, sr),
+                    peaking(2000, d(3), 1.2, sr), peaking(5000, d(4), 1.2, sr), highShelf(10000, d(5), sr)]
+        case .tubeAmp:
+            let mid = [500.0, 700.0, 900.0][min(max(Int(v[0].rounded()), 0), 2)]
+            var b = [lowShelf(110, (d(2) - 50) * 0.24, sr), peaking(mid, (d(3) - 50) * 0.24, 0.7, sr),
+                     highShelf(3200, (d(4) - 50) * 0.24, sr), highShelf(6000, d(5) * 0.08, sr)]
+            if v[7] > 0.5 {
+                b += [highpass(85, 0.7, sr), lowpass(5200, 0.7, sr), lowpass(5200, 0.7, sr), peaking(120, 3, 1.2, sr)]
+            }
+            return b
+        default:
+            return []
+        }
+    }
+
+    /// Respons dalam dB pada n titik, 20 Hz - 20 kHz (skala log).
+    static func response(_ type: BlockType, _ v: [Float], points n: Int, sr: Double = 48000) -> [Double] {
+        let bs = bands(type, v, sr: sr)
+        return (0..<n).map { i in
+            let f = 20 * pow(1000.0, Double(i) / Double(n - 1))
+            return bs.reduce(0.0) { $0 + magnitudeDB($1, f, sr) }
+        }
+    }
+}
+
+// MARK: - Grafik respons frekuensi
+
+struct EQCurveView: View {
+    let type: BlockType
+    let values: [Float]
+    let color: Color
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                AppBackground()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        section("Dari TONE3000 — diunduh otomatis", [.neural, .cab])
-                        section("Efek bawaan", [.gate, .comp, .boost, .drive, .eq, .chorus, .delay, .reverb])
-                    }
-                    .padding(16)
-                }
-            }
-            .navigationTitle("Slot \(slot + 1)")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Tutup") { dismiss() }
-                }
-            }
-        }
-        .preferredColorScheme(.dark)
-    }
+        Canvas { ctx, size in
+            let w = size.width, h = size.height, range = 15.0
+            func x(_ f: Double) -> CGFloat { CGFloat(log10(f / 20) / 3) * w }
+            func y(_ db: Double) -> CGFloat { h / 2 - CGFloat(max(min(db, range), -range) / range) * (h / 2) }
+            var grid = Path()
+            for db in [-12.0, -6.0, 0, 6, 12] { grid.move(to: CGPoint(x: 0, y: y(db))); grid.addLine(to: CGPoint(x: w, y: y(db))) }
+            for f in [50.0, 100, 200, 500, 1000, 2000, 5000, 10000] { grid.move(to: CGPoint(x: x(f), y: 0)); grid.addLine(to: CGPoint(x: x(f), y: h)) }
+            ctx.stroke(grid, with: .color(Theme.dim.opacity(0.18)), lineWidth: 0.5)
+            var zero = Path()
+            zero.move(to: CGPoint(x: 0, y: y(0))); zero.addLine(to: CGPoint(x: w, y: y(0)))
+            ctx.stroke(zero, with: .color(Theme.dim.opacity(0.45)), lineWidth: 1)
 
-    private func section(_ title: String, _ types: [BlockType]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Caption(text: title)
-            LazyVGrid(columns: cols, spacing: 12) {
-                ForEach(types, id: \.self) { t in
-                    Button { onPick(t) } label: { card(t) }
-                        .buttonStyle(.plain)
-                }
+            let n = 96
+            let r = EQMath.response(type, values, points: n)
+            var line = Path()
+            for i in 0..<n {
+                let p = CGPoint(x: w * CGFloat(i) / CGFloat(n - 1), y: y(r[i]))
+                if i == 0 { line.move(to: p) } else { line.addLine(to: p) }
+            }
+            var fill = line
+            fill.addLine(to: CGPoint(x: w, y: y(0))); fill.addLine(to: CGPoint(x: 0, y: y(0))); fill.closeSubpath()
+            ctx.fill(fill, with: .color(color.opacity(0.14)))
+            ctx.stroke(line, with: .color(color), lineWidth: 2)
+            for (f, t) in [(100.0, "100"), (1000.0, "1k"), (10000.0, "10k")] {
+                ctx.draw(Text(t).font(.system(size: 9)).foregroundColor(Theme.dim), at: CGPoint(x: x(f) + 10, y: h - 8))
             }
         }
+        .frame(height: 112)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.28)))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityLabel("Grafik respons frekuensi \(type.title)")
     }
+}
 
-    private func card(_ t: BlockType) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Image(systemName: t.icon)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(t.color)
-                Spacer()
-                if t.needsFile {
-                    Image(systemName: "icloud.and.arrow.down")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.dim)
-                }
+// MARK: - Analisis spektrum
+
+struct SpectrumView: View {
+    @ObservedObject var meters: MeterModel
+    var color: Color = Theme.cyan
+
+    var body: some View {
+        Canvas { ctx, size in
+            let b = meters.spectrum
+            let n = b.count
+            guard n > 0 else { return }
+            let gap: CGFloat = 2
+            let bw = (size.width - gap * CGFloat(n - 1)) / CGFloat(n)
+            for i in 0..<n {
+                let hgt = max(2, size.height * CGFloat(b[i]))
+                let r = CGRect(x: CGFloat(i) * (bw + gap), y: size.height - hgt, width: bw, height: hgt)
+                let c = b[i] > 0.9 ? Theme.red : (b[i] > 0.72 ? Theme.amber : color)
+                ctx.fill(Path(roundedRect: r, cornerRadius: 2), with: .color(c.opacity(0.9)))
             }
-            Text(t.title)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .lineLimit(1)
-            Text(t.summary)
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.dim)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(t.color.opacity(0.10)))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(t.color.opacity(0.4), lineWidth: 1))
+        .frame(height: 120)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.28)))
+        .accessibilityHidden(true)
     }
 }
