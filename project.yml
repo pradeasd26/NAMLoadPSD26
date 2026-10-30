@@ -8,6 +8,8 @@ targets:
   NAMLoader:
     type: application
     platform: iOS
+    dependencies:
+      - sdk: Accelerate.framework
     sources:
       - path: NAMLoader
       - path: NeuralAmpModelerCore/NAM
