@@ -13,6 +13,12 @@ jobs:
 
     steps:
       - name: Checkout
+            - name: Pilih Xcode terbaru
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -1)
+          echo "Memakai $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
         uses: actions/checkout@v4
 
       - name: Unduh NeuralAmpModelerCore
