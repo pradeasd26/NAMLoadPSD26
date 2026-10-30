@@ -3,18 +3,23 @@ import SwiftUI
 
 @MainActor
 final class AudioManager: ObservableObject {
+    static let slotCount = 12
+    static let laneSize = 6
+    private static let stateKey = "chain_v1"
+
     @Published var isRunning = false
-    @Published var modelName = "Belum ada model"
     @Published var message: String?
     @Published var inLevel: Float = 0     // 0...1 (−60...0 dBFS)
     @Published var outLevel: Float = 0
     @Published var feedbackMuted = false
     @Published var models: [URL] = []
     @Published var irs: [URL] = []
-    @Published var irName = "Tanpa cabinet IR"
-    @Published var irEnabled = true { didSet { proc.irEnabled = irEnabled } }
-    @Published var inputGainDb: Float = 0 { didSet { proc.inputGainDb = inputGainDb } }
-    @Published var masterDb: Float = 0 { didSet { proc.masterGainDb = masterDb } }
+    @Published var slots: [Slot] = ChainState.defaultSlots
+    @Published var dual = false { didSet { proc.dualMode = dual; persist() } }
+    @Published var balance: Float = 0.5 { didSet { proc.balance = balance; persist() } }
+    @Published var spread: Float = 0.5 { didSet { proc.spread = spread; persist() } }
+    @Published var inputGainDb: Float = 0 { didSet { proc.inputGainDb = inputGainDb; persist() } }
+    @Published var masterDb: Float = 0 { didSet { proc.masterGainDb = masterDb; persist() } }
     @Published var feedbackGuard = true { didSet { updateGuard() } }
 
     private let engine = AVAudioEngine()
@@ -26,6 +31,7 @@ final class AudioManager: ObservableObject {
     init() {
         FileStore.prepare()
         refreshModels()
+        restore()
         NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.routeChanged() }
@@ -102,15 +108,15 @@ final class AudioManager: ObservableObject {
         AVAudioSourceNode(format: format) { _, _, frames, abl in
             let list = UnsafeMutableAudioBufferListPointer(abl)
             guard let l = list[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+            var rOpt: UnsafeMutablePointer<Float>? = nil
+            if list.count > 1 { rOpt = list[1].mData?.assumingMemoryBound(to: Float.self) }
+            let r: UnsafeMutablePointer<Float> = rOpt ?? l
             let total = Int(frames)
             var done = 0
             while done < total {          // proses per blok maks 4096 frame
                 let c = min(4096, total - done)
-                p.renderOutput(l + done, frames: Int32(c))
+                p.renderLeft(l + done, right: r + done, frames: Int32(c))
                 done += c
-            }
-            if list.count > 1, let r = list[1].mData {
-                memcpy(r, l, total * MemoryLayout<Float>.size)
             }
             return noErr
         }
@@ -142,27 +148,113 @@ final class AudioManager: ObservableObject {
     }
     func unmuteOnce() { proc.muted = false; feedbackMuted = false }
 
-    // MARK: Model
+    // MARK: Daftar file
     func refreshModels() {
         models = FileStore.list("tones", ext: "nam")
         irs = FileStore.list("irs", ext: "wav")
     }
 
-    func importIR(_ url: URL) {
-        do {
-            let dest = try FileStore.importFile(url, into: "irs")
-            refreshModels(); loadIR(dest)
-        } catch { message = "Gagal mengimpor IR: \(error.localizedDescription)" }
+    // MARK: Rantai sinyal
+    func setType(_ i: Int, _ t: BlockType) {
+        guard slots.indices.contains(i), slots[i].type != t else { return }
+        slots[i] = Slot.make(t)
+        applySlot(i)
+        persist()
     }
 
-    func clearIR() { proc.clearImpulse(); irName = "Tanpa cabinet IR" }
+    func clearSlot(_ i: Int) { setType(i, .empty) }
 
-    func loadIR(_ url: URL) {
+    func setParam(_ i: Int, _ k: Int, _ v: Float) {
+        guard slots.indices.contains(i), k >= 0, k < 4 else { return }
+        slots[i].values[k] = v
+        proc.setParamForSlot(Int32(i), index: Int32(k), value: v)
+        persist()
+    }
+
+    func setOn(_ i: Int, _ on: Bool) {
+        guard slots.indices.contains(i) else { return }
+        slots[i].on = on
+        proc.setEnabledForSlot(Int32(i), enabled: on)
+        persist()
+    }
+
+    /// Mengisi slot (amp atau cab) dengan file yang sudah ada di folder tones/ atau irs/.
+    func assignFile(_ i: Int, _ url: URL) {
+        guard slots.indices.contains(i), slots[i].type.needsFile else { return }
+        let folder = slots[i].type == .neural ? "tones" : "irs"
+        let rel = folder + "/" + url.lastPathComponent
+        slots[i].file = rel
+        loadFile(i)
+        refreshModels()
+        persist()
+    }
+
+    func importFile(_ url: URL, into i: Int) {
+        guard slots.indices.contains(i), slots[i].type.needsFile else { return }
+        do {
+            let dest = try FileStore.importFile(url, into: slots[i].type == .neural ? "tones" : "irs")
+            assignFile(i, dest)
+        } catch { message = "Gagal mengimpor: \(error.localizedDescription)" }
+    }
+
+    func isSelected(_ i: Int, file url: URL) -> Bool {
+        guard slots.indices.contains(i), let f = slots[i].file else { return false }
+        return f.hasSuffix("/" + url.lastPathComponent)
+    }
+
+    private func applySlot(_ i: Int) {
+        let s = slots[i]
+        proc.configureSlot(Int32(i), type: Int32(s.type.rawValue))
+        for k in 0..<4 { proc.setParamForSlot(Int32(i), index: Int32(k), value: s.values[k]) }
+        proc.setEnabledForSlot(Int32(i), enabled: s.on)
+        if s.type.needsFile, s.file != nil { loadFile(i) }
+    }
+
+    private func applyAll() {
+        proc.dualMode = dual
+        proc.balance = balance
+        proc.spread = spread
+        proc.inputGainDb = inputGainDb
+        proc.masterGainDb = masterDb
+        for i in slots.indices { applySlot(i) }
+    }
+
+    private func loadFile(_ i: Int) {
+        guard let rel = slots[i].file else { return }
+        let url = FileStore.root.appendingPathComponent(rel)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            slots[i].file = nil
+            return
+        }
+        if slots[i].type == .neural {
+            do {
+                try proc.loadModel(atPath: url.path, forSlot: Int32(i))
+                message = nil
+            } catch {
+                slots[i].file = nil
+                message = "Model tidak bisa dimuat: \(error.localizedDescription)"
+            }
+        } else if slots[i].type == .cab {
+            if let ir = decodeIR(url) {
+                ir.withUnsafeBufferPointer { bp in
+                    if let base = bp.baseAddress {
+                        proc.setImpulse(base, length: Int32(bp.count), forSlot: Int32(i))
+                    }
+                }
+                message = nil
+            } else {
+                slots[i].file = nil
+                message = "IR tidak bisa dimuat."
+            }
+        }
+    }
+
+    private func decodeIR(_ url: URL) -> [Float]? {
         do {
             let file = try AVAudioFile(forReading: url)
             let target = AVAudioSession.sharedInstance().sampleRate
             let inFmt = file.processingFormat
-            guard let inBuf = AVAudioPCMBuffer(pcmFormat: inFmt, frameCapacity: AVAudioFrameCount(file.length)) else { return }
+            guard let inBuf = AVAudioPCMBuffer(pcmFormat: inFmt, frameCapacity: AVAudioFrameCount(file.length)) else { return nil }
             try file.read(into: inBuf)
             var buf = inBuf
             if abs(inFmt.sampleRate - target) > 1,
@@ -178,25 +270,31 @@ final class AudioManager: ObservableObject {
                     buf = out
                 }
             }
-            guard let ch = buf.floatChannelData?[0] else { return }
-            proc.setImpulse(ch, length: Int32(buf.frameLength))
-            irName = url.deletingPathExtension().lastPathComponent
-            message = nil
-        } catch { message = "IR tidak bisa dimuat: \(error.localizedDescription)" }
+            guard let ch = buf.floatChannelData?[0] else { return nil }
+            return Array(UnsafeBufferPointer(start: ch, count: Int(buf.frameLength)))
+        } catch { return nil }
     }
 
-    func importModel(_ url: URL) {
-        do {
-            let dest = try FileStore.importFile(url, into: "tones")
-            refreshModels(); loadModel(dest)
-        } catch { message = "Gagal mengimpor: \(error.localizedDescription)" }
+    // MARK: Simpan otomatis
+    private func persist() {
+        let st = ChainState(slots: slots, dual: dual, balance: balance, spread: spread,
+                            inputDb: inputGainDb, masterDb: masterDb)
+        if let d = try? JSONEncoder().encode(st) {
+            UserDefaults.standard.set(d, forKey: Self.stateKey)
+        }
     }
 
-    func loadModel(_ url: URL) {
-        do {
-            try proc.loadModel(atPath: url.path)
-            modelName = url.deletingPathExtension().lastPathComponent
-            message = nil
-        } catch { message = "Model tidak bisa dimuat: \(error.localizedDescription)" }
+    private func restore() {
+        if let d = UserDefaults.standard.data(forKey: Self.stateKey),
+           let st = try? JSONDecoder().decode(ChainState.self, from: d),
+           st.slots.count == Self.slotCount {
+            slots = st.slots
+            dual = st.dual
+            balance = st.balance
+            spread = st.spread
+            inputGainDb = st.inputDb
+            masterDb = st.masterDb
+        }
+        applyAll()
     }
 }
