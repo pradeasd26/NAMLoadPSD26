@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/34208871/README.md)
 # NAMLoader (iOS 17+, termasuk iPhone XS / iOS 18)
 
 Fitur: tombol daya, meter IN/OUT, trim input, master, model `.nam` mono (NeuralAmpModelerCore),
@@ -24,6 +25,20 @@ project.yml  setup.sh  README.md
 2. Ganti bundle ID di `project.yml` (`com.pradea26.namloader`) bila perlu, jalankan `./setup.sh` lagi.
 3. Xcode → target NAMLoader → Signing & Capabilities → pilih Team (Apple ID).
 4. Colok iPhone XS → Run.
+
+## Fitur
+- **TONE3000**: tombol "Buka TONE3000" membuka beranda tone3000.com langsung di dalam app (tanpa Client ID/OAuth).
+  Login di website, ketuk Download pada tone: file `.nam` / `.wav` / `.zip` otomatis disimpan dan dipasang ke slot.
+  Menu blok › "Ambil dari website TONE3000" (AMP, PEDAL, SIM, CAB, GATE, COMP, REVERB, CHORUS, MOD, DELAY, EQ, FX).
+- **Preset**: tombol Simpan di tab Rig menyimpan ke daftar preset pengguna dan/atau salah satu dari **10 bank**.
+  Bank tersimpan di Files › NAMLoader › `Banks.json`, preset pengguna di `presets/`.
+- **Mode jalur**: 1 JALUR, 2 JALUR (paralel, stereo), atau GABUNG (jalur A + B dijumlahkan jadi 1 output mono).
+- **MIDI eksternal** (tab Setup › MIDI): USB atau Bluetooth LE MIDI. Program Change 0–9 atau Note 36–45 → Bank 1–10;
+  CC 80 = bank berikut, CC 81 = bank sebelum (bisa diubah dengan tombol Pelajari).
+
+## Lisensi pihak ketiga
+NAMLoader memakai Neural Amp Modeler Core (MIT, © Steven Atkinson) dan Eigen (MPL 2.0). Teks lisensi aslinya ada di
+folder hasil unduhan `NeuralAmpModelerCore/` (`LICENSE`) dan wajib tetap disertakan bila kode/biner dibagikan.
 
 ## Catatan
 - Model `.nam` harus mono (1 input, 1 output) — hampir semua model amp/pedal memenuhi ini.
