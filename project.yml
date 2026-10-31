@@ -10,6 +10,9 @@ targets:
     platform: iOS
     dependencies:
       - sdk: Accelerate.framework
+      - sdk: CoreMIDI.framework
+      - sdk: CoreAudioKit.framework
+      - sdk: WebKit.framework
     sources:
       - path: NAMLoader
       - path: NeuralAmpModelerCore/NAM
@@ -20,6 +23,7 @@ targets:
         CFBundleDisplayName: NAMLoader
         UILaunchScreen: {}
         NSMicrophoneUsageDescription: "Untuk mendengar gitar atau mikrofon kamu. Audio tidak pernah meninggalkan perangkat."
+        NSBluetoothAlwaysUsageDescription: "Untuk menghubungkan kontroler MIDI Bluetooth (foot-switch / keyboard) agar bisa memindah preset."
         UIBackgroundModes: [audio]
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
